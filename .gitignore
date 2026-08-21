@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# SQLite price cache -- regenerated on first run, not source
+data/
+
+# Generated reports (HTML/CSV scan output, chart snapshots)
+reports/
