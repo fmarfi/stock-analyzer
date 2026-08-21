@@ -51,6 +51,32 @@ CREATE TABLE IF NOT EXISTS ticker_sectors (
     industry TEXT,
     fetched_at TEXT NOT NULL
 );
+
+-- One flat list, not per-user (this app has no login) -- added_at only
+-- controls display order (oldest add first), nothing prunes it over time.
+CREATE TABLE IF NOT EXISTS watchlist (
+    ticker TEXT PRIMARY KEY,
+    added_at TEXT NOT NULL
+);
+
+-- Append-only ledger, not a holdings snapshot -- current position
+-- (quantity, average cost, realized P&L) is derived by replaying every
+-- ticker's transactions in date order (see get_portfolio_positions), the
+-- same "one engine, recomputed from source facts" philosophy as
+-- scan_results being derived from price_history rather than hand-edited.
+-- This is average-cost accounting, not FIFO lot tracking: a buy blends
+-- into the running average cost, a sell reduces quantity without changing
+-- the remaining shares' average cost.
+CREATE TABLE IF NOT EXISTS portfolio_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    quantity REAL NOT NULL,
+    price REAL NOT NULL,
+    txn_date TEXT NOT NULL,     -- YYYY-MM-DD, user-editable (defaults to today)
+    created_at TEXT NOT NULL    -- when the row was inserted, for tie-breaking same-day order
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_transactions_ticker ON portfolio_transactions(ticker);
 """
 
 
@@ -202,3 +228,99 @@ def upsert_sector(conn, ticker, sector, industry, fetched_at):
         (ticker, sector, industry, fetched_at),
     )
     conn.commit()
+
+
+def get_watchlist(conn):
+    """Return watchlist tickers ordered oldest-added-first."""
+    cur = conn.execute("SELECT ticker FROM watchlist ORDER BY added_at, ticker")
+    return [row[0] for row in cur.fetchall()]
+
+
+def add_to_watchlist(conn, ticker, added_at):
+    """No-op (via INSERT OR IGNORE) if `ticker` is already on the list --
+    re-adding an existing ticker shouldn't bump its display order.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)", (ticker, added_at),
+    )
+    conn.commit()
+
+
+def remove_from_watchlist(conn, ticker):
+    conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
+    conn.commit()
+
+
+def add_portfolio_transaction(conn, ticker, side, quantity, price, txn_date, created_at):
+    """Append one buy/sell row. Never validates against current position
+    (e.g. "can't sell more than you hold") -- that's a UI-level concern
+    (see pages/portfolio.py), not a data-layer one, since the ledger is
+    meant to be an honest record of what was entered.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO portfolio_transactions (ticker, side, quantity, price, txn_date, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (ticker, side, quantity, price, txn_date, created_at),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def delete_portfolio_transaction(conn, txn_id):
+    conn.execute("DELETE FROM portfolio_transactions WHERE id = ?", (txn_id,))
+    conn.commit()
+
+
+def get_portfolio_transactions(conn, limit=None):
+    """Every transaction, newest first (txn_date, then insertion order as
+    tie-break) -- used for the on-page transaction log, not for computing
+    positions (see get_portfolio_positions, which reads chronologically).
+    """
+    conn.row_factory = sqlite3.Row
+    query = "SELECT * FROM portfolio_transactions ORDER BY txn_date DESC, id DESC"
+    if limit:
+        query += f" LIMIT {int(limit)}"
+    cur = conn.execute(query)
+    result = cur.fetchall()
+    conn.row_factory = None
+    return result
+
+
+def get_portfolio_positions(conn):
+    """Replay every transaction in chronological order (oldest first) to
+    derive each ticker's current quantity, average cost, and realized P&L
+    under average-cost accounting: a buy blends into the running average
+    cost; a sell reduces quantity without changing the remaining shares'
+    average cost, and its realized P&L is (sell_price - avg_cost at that
+    moment) * sell_qty. A sell for more than is currently held is clamped
+    to whatever's held (defensive -- the UI is expected to reject that
+    before it's ever inserted).
+
+    Returns {ticker: {"quantity": float, "avg_cost": float, "realized_pnl": float}}
+    for EVERY ticker ever transacted, including ones fully sold down to
+    zero -- callers that only want current holdings should filter
+    quantity > 0 themselves; a closed position's realized P&L still needs
+    to count toward the portfolio-wide total.
+    """
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT ticker, side, quantity, price FROM portfolio_transactions ORDER BY txn_date, id"
+    )
+    rows = cur.fetchall()
+    conn.row_factory = None
+
+    positions = {}
+    for row in rows:
+        pos = positions.setdefault(row["ticker"], {"quantity": 0.0, "avg_cost": 0.0, "realized_pnl": 0.0})
+        if row["side"] == "buy":
+            new_qty = pos["quantity"] + row["quantity"]
+            if new_qty > 0:
+                pos["avg_cost"] = (pos["quantity"] * pos["avg_cost"] + row["quantity"] * row["price"]) / new_qty
+            pos["quantity"] = new_qty
+        else:
+            sell_qty = min(row["quantity"], pos["quantity"])
+            pos["realized_pnl"] += (row["price"] - pos["avg_cost"]) * sell_qty
+            pos["quantity"] -= sell_qty
+    return positions

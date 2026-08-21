@@ -1005,6 +1005,94 @@ var gd = document.getElementById('{plot_id}');
         crosshairTagEl.style.display = 'block';
     });
     gd.addEventListener('mouseleave', function() { crosshairTagEl.style.display = 'none'; });
+
+    // Click-for-details: hoverinfo is set to "none" on every trace (see
+    // build_chart_fig) specifically to kill the floating OHLC tooltip that
+    // used to trail the cursor -- but that also removed any way to read a
+    // bar's actual numbers. This restores that on click instead of hover: a
+    // small panel, positioned near the click and left on screen (not tied
+    // to mousemove) until dismissed, showing the clicked candle's O/H/L/C
+    // (+ change) or, for a Bar trace (Volume, MACD histogram), its value.
+    // Reuses Plotly's own plotly_click event rather than reimplementing
+    // hit-testing: Plotly still finds the nearest point and populates
+    // pt.open/high/low/close/y for us even with hoverinfo="none" (that
+    // flag only suppresses the tooltip's own text, not point detection --
+    // same distinction that mattered for the crosshair spike lines).
+    var detailBoxEl = document.createElement('div');
+    detailBoxEl.style.cssText = 'position:fixed;display:none;background:#1e1e1e;color:white;' +
+        'font-family:Arial, sans-serif;font-size:12px;padding:8px 10px;border-radius:6px;' +
+        'border:1px solid #444;z-index:1001;box-shadow:0 2px 10px rgba(0,0,0,0.5);' +
+        'min-width:150px;';
+    document.body.appendChild(detailBoxEl);
+
+    function hideDetailBox() { detailBoxEl.style.display = 'none'; }
+
+    function fmtNum(v) {
+        return (v === undefined || v === null || isNaN(v)) ? '-' :
+            Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+
+    gd.on('plotly_click', function(data) {
+        if (hlineMode || deleteMode) { return; }
+        if (!data || !data.points || !data.points.length) { return; }
+        // hovermode="x" reports every trace sharing the clicked x column
+        // within that row (e.g. clicking the price panel also matches
+        // whichever moving average/BB line happens to sit closest to the
+        // click's y), ordered by y-distance -- closest first, not
+        // necessarily the candle. A click anywhere in the price row should
+        // read as "show me this candle", so the OHLC trace wins whenever
+        // it's one of the matches; otherwise fall back to the nearest
+        // point (a single Bar trace in the Volume/MACD-hist row, or an
+        // indicator line with no OHLC of its own).
+        var pt = data.points.find(function(p) {
+            var t = gd.data[p.curveNumber];
+            return t && (t.type === 'ohlc' || t.type === 'candlestick');
+        }) || data.points[0];
+        var trace = gd.data[pt.curveNumber] || {};
+
+        var rows = [];
+        if (pt.open !== undefined && pt.close !== undefined) {
+            var chg = pt.close - pt.open;
+            var chgPct = pt.open ? (chg / pt.open * 100) : 0;
+            var chgColor = chg >= 0 ? '#26a69a' : '#ef5350';
+            rows.push(['Open', fmtNum(pt.open)]);
+            rows.push(['High', fmtNum(pt.high)]);
+            rows.push(['Low', fmtNum(pt.low)]);
+            rows.push(['Close', fmtNum(pt.close)]);
+            rows.push(['Change', '<span style="color:' + chgColor + ';">' +
+                (chg >= 0 ? '+' : '') + fmtNum(chg) + ' (' + (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%)</span>']);
+        } else {
+            rows.push([trace.name || 'Value', fmtNum(pt.y)]);
+        }
+
+        var html = '<div style="display:flex;justify-content:space-between;align-items:center;' +
+            'margin-bottom:6px;gap:16px;"><b>' + String(pt.x) + '</b>' +
+            '<span data-role="detail-box-close" style="cursor:pointer;color:#9e9e9e;padding:0 2px;">&times;</span></div>';
+        rows.forEach(function(r) {
+            html += '<div style="display:flex;justify-content:space-between;gap:16px;">' +
+                '<span style="color:#9e9e9e;">' + r[0] + '</span><span>' + r[1] + '</span></div>';
+        });
+        detailBoxEl.innerHTML = html;
+
+        var evt = data.event || {};
+        var clientX = evt.clientX !== undefined ? evt.clientX : (window.innerWidth / 2);
+        var clientY = evt.clientY !== undefined ? evt.clientY : (window.innerHeight / 2);
+        detailBoxEl.style.left = Math.min(clientX + 14, window.innerWidth - 190) + 'px';
+        detailBoxEl.style.top = Math.min(clientY + 14, window.innerHeight - 140) + 'px';
+        detailBoxEl.style.display = 'block';
+
+        var closeEl = detailBoxEl.querySelector('[data-role="detail-box-close"]');
+        if (closeEl) { closeEl.onclick = hideDetailBox; }
+    });
+
+    document.addEventListener('click', function(evt) {
+        if (detailBoxEl.style.display === 'none') { return; }
+        if (detailBoxEl.contains(evt.target) || gd.contains(evt.target)) { return; }
+        hideDetailBox();
+    });
+    document.addEventListener('keydown', function(evt) {
+        if (evt.key === 'Escape') { hideDetailBox(); }
+    });
 })();
 """
 
@@ -1067,13 +1155,12 @@ def build_mini_card(result: dict, align_threshold: int):
             _edge_span("bear edge", stats["bear_edge"], stats["n_bear"]),
         ], style={"display": "flex", "flexDirection": "column", "gap": "2px", "marginBottom": "10px"}),
 
-        html.Button("View Chart", id={"type": "view-btn", "index": ticker}, n_clicks=0, style={
-            "backgroundColor": config.BLUE, "color": "white", "border": "none", "borderRadius": "6px",
-            "padding": "6px 12px", "cursor": "pointer", "width": "100%",
+        html.Button("View Chart", id={"type": "view-btn", "index": ticker}, n_clicks=0, className="btn", style={
+            "backgroundColor": config.BLUE, "color": "white", "width": "100%",
         }),
-    ], style={
+    ], className="hover-card", style={
         "backgroundColor": config.CARD_BG, "padding": "14px", "borderRadius": "10px",
-        "color": "white", "fontFamily": "Arial, sans-serif", "width": "220px",
+        "color": "white", "width": "220px",
         "boxShadow": "0 2px 8px rgba(0,0,0,0.4)",
     })
 
@@ -1081,10 +1168,15 @@ def build_mini_card(result: dict, align_threshold: int):
 def number_input(label, input_id, value, min_value, step=1):
     return html.Div([
         html.Label(label, style={"color": config.MUTED_TEXT, "fontSize": "12px", "display": "block"}),
-        dcc.Input(id=input_id, type="number", value=value, min=min_value, step=step, style={
-            "width": "80px", "backgroundColor": config.INPUT_BG, "color": "white",
-            "border": f"1px solid {config.BORDER_COLOR}", "borderRadius": "4px", "padding": "4px",
-        }),
+        # persistence: remembers whatever the user last typed here in the
+        # browser's localStorage, keyed by this component's id -- without
+        # it, every parameter input snaps back to config.py's default the
+        # moment the tab/dashboard is closed and reopened.
+        dcc.Input(id=input_id, type="number", value=value, min=min_value, step=step,
+                  persistence=True, persistence_type="local", style={
+                      "width": "80px", "backgroundColor": config.INPUT_BG, "color": "white",
+                      "border": f"1px solid {config.BORDER_COLOR}", "borderRadius": "4px", "padding": "4px",
+                  }),
     ])
 
 
@@ -1105,10 +1197,10 @@ def stoch_mode_selector(input_id: str, value: str = config.STOCH_MODE):
                 {"label": " Slow", "value": "slow"},
                 {"label": " Full", "value": "full"},
             ],
-            value=value, inline=True,
+            value=value, inline=True, persistence=True, persistence_type="local",
             style={"color": "white", "fontSize": "13px"},
             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
-            labelStyle={"marginRight": "4px"},
+            labelStyle={"marginRight": "4px", "color": "white"},
         ),
     ])
 
@@ -1146,9 +1238,10 @@ def indicator_checklist(input_id: str):
             id=input_id,
             options=[{"label": f" {ind.label}", "value": ind.name} for ind in indicators.REGISTRY],
             value=[ind.name for ind in indicators.REGISTRY],
-            inline=True,
+            inline=True, persistence=True, persistence_type="local",
             style={"color": "white", "fontSize": "13px"},
             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+            labelStyle={"color": "white"},
         ),
     ])
 
@@ -1158,10 +1251,11 @@ def page_header(title: str, description: str = None):
     every page (including Home) so the app reads as one product instead of
     six differently-styled sections stapled together.
     """
-    children = [html.H2(title, style={"color": "white", "fontFamily": "Arial, sans-serif", "marginTop": 0})]
+    children = [html.H2(title, style={"color": "white", "marginTop": 0, "marginBottom": "6px",
+                                       "fontWeight": 600, "letterSpacing": "-0.2px"})]
     if description:
         children.append(html.Div(description, style={
-            "color": config.MUTED_TEXT, "fontFamily": "Arial, sans-serif", "fontSize": "13px",
-            "marginBottom": "12px", "maxWidth": "720px",
+            "color": config.MUTED_TEXT, "fontSize": "13px",
+            "marginBottom": "12px", "maxWidth": "720px", "lineHeight": "1.5",
         }))
-    return html.Div(children, style={"marginBottom": "16px"})
+    return html.Div(children, style={"marginBottom": "18px"})

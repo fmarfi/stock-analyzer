@@ -47,10 +47,11 @@ _DIRECTION_OPTIONS = [
 
 
 def _filter_input(label, input_id, placeholder=None, value=None, input_type="number", width="90px", step=1):
-    kwargs = {"type": input_type, "id": input_id, "value": value, "style": {
-        "width": width, "backgroundColor": config.INPUT_BG, "color": "white",
-        "border": f"1px solid {config.BORDER_COLOR}", "borderRadius": "6px", "padding": "6px 8px",
-    }}
+    kwargs = {"type": input_type, "id": input_id, "value": value, "persistence": True,
+              "persistence_type": "local", "style": {
+                  "width": width, "backgroundColor": config.INPUT_BG, "color": "white",
+                  "border": f"1px solid {config.BORDER_COLOR}", "borderRadius": "6px", "padding": "6px 8px",
+              }}
     if input_type == "number":
         kwargs["step"] = step
     if placeholder:
@@ -66,11 +67,15 @@ layout = html.Div([
     page_header("Confluence Scoreboard", "Latest-bar read for the tickers you pick -- Trend/Momentum/"
                 "Volume/MACD votes, confluence score, and historical hit rate/edge."),
 
+    # persistence: remembers your last ticker selection (and the filter
+    # controls, scan-cache, etc. below) in the browser's localStorage --
+    # without it, closing the tab/dashboard and coming back meant starting
+    # from BIST_YILDIZ_TICKERS[:10] and an empty grid every single time.
     dcc.Dropdown(
         id="ticker-dropdown",
         options=[{"label": t, "value": t} for t in DROPDOWN_TICKERS],
         value=BIST_YILDIZ_TICKERS[:10],
-        multi=True,
+        multi=True, persistence=True, persistence_type="local",
         style={"marginBottom": "16px"},
     ),
 
@@ -86,23 +91,18 @@ layout = html.Div([
     html.Div(indicator_checklist("active-indicators-input"), style={"marginBottom": "16px"}),
 
     html.Div([
-        html.Button("Update Scoreboard", id="update-btn", n_clicks=0, style={
-            "backgroundColor": config.BLUE, "color": "white", "border": "none", "borderRadius": "6px",
-            "padding": "8px 16px", "cursor": "pointer",
+        html.Button("Update Scoreboard", id="update-btn", n_clicks=0, className="btn", style={
+            "backgroundColor": config.BLUE, "color": "white",
         }),
-        html.Button("Generate Report", id="report-btn", n_clicks=0, style={
-            "backgroundColor": config.GREEN, "color": "white", "border": "none", "borderRadius": "6px",
-            "padding": "8px 16px", "cursor": "pointer",
+        html.Button("Generate Report", id="report-btn", n_clicks=0, className="btn", style={
+            "backgroundColor": config.GREEN, "color": "white",
         }),
         # /reports/latest.html always holds whatever "Generate Report" wrote
         # most recently (write_reports() overwrites it in place), so this
         # link never needs to react to state -- it's just always current.
         # Opens in a new tab, same reasoning as "View Chart" elsewhere.
-        html.A("View Last Report", href="/reports/latest.html", target="_blank", style={
-            "backgroundColor": config.CARD_BG, "color": "white", "border": f"1px solid {config.BORDER_COLOR}",
-            "borderRadius": "6px", "padding": "8px 16px", "cursor": "pointer", "textDecoration": "none",
-            "fontFamily": "Arial, sans-serif", "fontSize": "14px", "display": "inline-block",
-        }),
+        html.A("View Last Report", href="/reports/latest.html", target="_blank", className="btn btn-outline",
+               style={"textDecoration": "none", "display": "inline-block"}),
     ], style={"display": "flex", "gap": "12px", "marginBottom": "20px", "alignItems": "center"}),
 
     html.Div(id="report-status", style={"color": config.MUTED_TEXT, "fontFamily": "Arial, sans-serif",
@@ -122,13 +122,13 @@ layout = html.Div([
             html.Label("Direction", style={"color": config.MUTED_TEXT, "fontSize": "12px", "display": "block",
                                             "marginBottom": "2px"}),
             dcc.Dropdown(id="filter-direction", options=_DIRECTION_OPTIONS, value="all", clearable=False,
-                         style={"width": "200px"}),
+                         persistence=True, persistence_type="local", style={"width": "200px"}),
         ]),
         html.Div([
             html.Label("Sort by", style={"color": config.MUTED_TEXT, "fontSize": "12px", "display": "block",
                                           "marginBottom": "2px"}),
             dcc.Dropdown(id="filter-sort-by", options=_SORT_OPTIONS, value="confluence_desc", clearable=False,
-                         style={"width": "200px"}),
+                         persistence=True, persistence_type="local", style={"width": "200px"}),
         ]),
         _filter_input("Ticker contains", "filter-ticker-search", placeholder="e.g. GARAN",
                       input_type="text", width="140px"),
@@ -143,8 +143,12 @@ layout = html.Div([
     # Full per-ticker result set from the last "Update Scoreboard" scan --
     # {"tickers": {ticker: {...build_mini_card()-shaped result...}},
     #  "align_threshold": int}. The filter/sort bar re-renders scoreboard-grid
-    # from this without touching the engine again.
-    dcc.Store(id="scan-cache"),
+    # from this without touching the engine again. storage_type="local"
+    # (browser localStorage, not the default in-memory Store that clears on
+    # every refresh) means the grid survives closing the tab or restarting
+    # the dashboard -- reopening shows the last scan instead of a blank
+    # page until you click "Update Scoreboard" again.
+    dcc.Store(id="scan-cache", storage_type="local"),
 
     # Dummy output for the clientside callback below -- "View Chart" opens
     # the chart in its own browser tab/window (via the /chart/<ticker> Flask

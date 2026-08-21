@@ -1,10 +1,15 @@
 """Dash app shell -- multi-page version of what used to be one long
-scrolling single-page dashboard. Each report (Scoreboard, Squeeze, Bounce,
-Triangles, Strategy by Sector, Snapshots) is its own page under
-stock_analyzer/pages/, auto-discovered by Dash's `use_pages=True`; this
-module only owns the app-wide shell (sidebar nav + page_container), the
-standalone /chart/<ticker> Flask route (shared by every page's "View Chart"
-button), and the run block.
+scrolling single-page dashboard. Home, Scoreboard, and Portfolio are each
+their own page under stock_analyzer/pages/, auto-discovered by Dash's
+`use_pages=True`; this module only owns the app-wide shell (sidebar nav +
+page_container), the standalone /chart/<ticker> Flask route (shared by
+every page's "View Chart" button), and the run block.
+
+Squeeze/Bounce/Triangles/Strategy-by-Sector/Snapshots used to be pages here
+too; their pages/*.py modules were removed to keep the app to what's
+actually used day to day, but the underlying scan/report engines
+(reporting/squeeze_report.py etc., still wired into run_scan.py's CLI) are
+untouched -- this only trimmed the Dash UI surface, not the analysis code.
 
 Shared building blocks (build_chart_fig, CHART_CONFIG, ticker lists, small
 UI helpers) live in dashboard_shared.py, not here -- page modules import
@@ -57,18 +62,14 @@ app = Dash(
 
 # Controls sidebar order -- dash.page_registry's own order follows module
 # discovery order, not necessarily the workflow order a reader wants.
-_NAV_ORDER = ["/", "/scoreboard", "/squeeze", "/bounce", "/triangles", "/strategy", "/snapshots"]
+_NAV_ORDER = ["/", "/scoreboard", "/portfolio"]
 
 
 def _sidebar_link(page: dict, current_path: str):
     active = page["path"] == current_path
-    return dcc.Link(page["name"], href=page["path"], style={
-        "display": "block", "padding": "10px 16px", "borderRadius": "6px",
-        "color": "white" if active else config.MUTED_TEXT,
-        "backgroundColor": config.BLUE if active else "transparent",
-        "textDecoration": "none", "fontFamily": "Arial, sans-serif", "fontSize": "14px",
-        "marginBottom": "2px",
-    })
+    return dcc.Link(page["name"], href=page["path"], className="nav-link",
+                     style={"backgroundColor": config.BLUE if active else "transparent",
+                            "color": "white" if active else config.MUTED_TEXT})
 
 
 def _ordered_pages():
@@ -85,16 +86,26 @@ def _ordered_pages():
 app.layout = html.Div([
     dcc.Location(id="_url"),
     html.Div([
-        html.Div("Stock Analyzer", style={
-            "color": "white", "fontFamily": "Arial, sans-serif", "fontWeight": "bold",
-            "fontSize": "16px", "padding": "16px", "borderBottom": f"1px solid {config.BORDER_COLOR}",
+        html.Div([
+            html.Div("△", style={
+                "width": "30px", "height": "30px", "borderRadius": "8px", "backgroundColor": config.BLUE,
+                "display": "flex", "alignItems": "center", "justifyContent": "center",
+                "fontSize": "15px", "color": "white", "flexShrink": 0,
+            }),
+            html.Div("Stock Analyzer", style={
+                "color": "white", "fontWeight": 600, "fontSize": "15px", "letterSpacing": "0.2px",
+            }),
+        ], style={
+            "display": "flex", "alignItems": "center", "gap": "10px",
+            "padding": "18px 16px", "borderBottom": f"1px solid {config.BORDER_COLOR}",
         }),
         html.Div(id="sidebar-nav", style={"padding": "12px 8px"}),
-    ], style={
-        "width": "200px", "flexShrink": 0, "backgroundColor": config.CARD_BG,
+    ], className="sidebar", style={
+        "width": "210px", "flexShrink": 0, "backgroundColor": config.CARD_BG,
         "minHeight": "100vh", "position": "sticky", "top": 0, "alignSelf": "flex-start",
+        "borderRight": f"1px solid {config.BORDER_COLOR}",
     }),
-    html.Div(dash.page_container, style={"flex": 1, "padding": "24px", "minWidth": 0}),
+    html.Div(dash.page_container, style={"flex": 1, "padding": "28px 32px", "minWidth": 0}),
 ], style={"display": "flex", "backgroundColor": config.PAGE_BG, "minHeight": "100vh"})
 
 
