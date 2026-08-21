@@ -209,7 +209,7 @@ def fetch_and_load(conn, ticker, default_start_date=None, end_date=None):
     return frame, fetch_result
 
 
-def fetch_hourly_ohlcv(ticker, period="730d"):
+def fetch_hourly_ohlcv(ticker, period="180d"):
     """Fetch hourly OHLCV bars directly from yfinance for the standalone
     chart window's Hourly view -- deliberately NOT cached in SQLite the way
     daily bars are (fetch_and_update/load_full_history): hourly data has a
@@ -220,6 +220,14 @@ def fetch_hourly_ohlcv(ticker, period="730d"):
     to gain from persisting it -- one fresh request per chart open is cheap
     enough. Returns a DataFrame with a tz-aware (exchange-local) DatetimeIndex
     and Open/High/Low/Close/Volume columns, empty if yfinance has nothing.
+
+    period defaults to 180d (~1500 bars), not yfinance's max of 730d
+    (~6250 bars): the default Hourly view only ever shows the last ~160 bars
+    on open (see _RECENT_WINDOW_BARS), and every extra bar past what's
+    actually useful for pan-back is more data every trace carries, every
+    zoom/pan step has to re-scan, and every KB the browser has to load and
+    keep interactive -- 730 days of hourly detail is far more history than
+    "hourly" is ever used to look at anyway.
     """
     try:
         raw = yf.download(

@@ -272,6 +272,14 @@ def build_chart_fig(df, ticker, indicator_instances=None, recent_window_bars=126
     # updatable via the "+ Add Indicator" menu. `overlay_range_series`
     # collects everything drawn here so the price y-range below can account
     # for a long/wide overlay instead of clipping it.
+    #
+    # Every line trace in this function uses go.Scatter, not go.Scattergl --
+    # go.Scattergl was tried once for the large-dataset render-speed win,
+    # but it needs a real WebGL context, and every single Scattergl trace
+    # silently failed to draw (present in gd.data, invisible on screen,
+    # zero console errors) the moment WebGL wasn't available/working, which
+    # is exactly what "my indicators disappeared" turned out to be. Data
+    # correctness beats the render speed here, so this stays plain SVG.
     overlay_range_series = []
     for inst in overlay_instances:
         t, color = inst["type"], inst["color"]
@@ -593,6 +601,37 @@ function decodeCached(trace, field) {
     return cache[field];
 }
 
+// x as millisecond timestamps, computed once and cached alongside the
+// decoded arrays above -- re-parsing every point's ISO date string with
+// `new Date(...).getTime()` on every single pan/zoom step (thousands of
+// points x however many traces, every step) was real, measurable overhead
+// on top of the O(n) scan it was embedded in.
+function numericX(trace) {
+    var cache = _decodeCache.get(trace);
+    if (!cache) { cache = {}; _decodeCache.set(trace, cache); }
+    if (!cache.xNum) {
+        var xArr = decodeCached(trace, 'x');
+        var xNum = new Array(xArr.length);
+        for (var i = 0; i < xArr.length; i++) { xNum[i] = new Date(xArr[i]).getTime(); }
+        cache.xNum = xNum;
+    }
+    return cache.xNum;
+}
+
+// First index where arr[index] >= target -- arr is chronological (every
+// trace's x is sorted ascending), so this replaces an O(n) full-array scan
+// with an O(log n) search for where the visible window starts; the caller
+// still only walks the points actually inside [x0, x1], not the whole
+// trace, however far zoomed in.
+function lowerBound(arr, target) {
+    var lo = 0, hi = arr.length;
+    while (lo < hi) {
+        var mid = (lo + hi) >>> 1;
+        if (arr[mid] < target) { lo = mid + 1; } else { hi = mid; }
+    }
+    return lo;
+}
+
 gd.on('plotly_relayout', function(eventData) {
     function isFixedScale(axisName) {
         var axisLayout = gd.layout[axisName];
@@ -635,6 +674,18 @@ gd.on('plotly_relayout', function(eventData) {
         return;
     }
 
+    // Set by DRAW_TOOLS_JS's wheel handler right before its own x-only
+    // scroll-zoom relayout -- that gesture is meant to leave every y-range
+    // exactly as it was (scrolling the timeline shouldn't jostle the price
+    // scale), so this listener's usual "re-fit y to what's now visible"
+    // reaction is skipped for just this one relayout call. Box-zoom/pan
+    // (dragmode="zoom"/"pan") never set this flag, so those still re-fit
+    // as before -- this only mutes the wheel-zoom case.
+    if (gd.__skipAutoRescale) {
+        gd.__skipAutoRescale = false;
+        return;
+    }
+
     var x0 = eventData['xaxis.range[0]'], x1 = eventData['xaxis.range[1]'];
     if (x0 === undefined || x1 === undefined) { return; }
     x0 = new Date(x0).getTime();
@@ -648,27 +699,28 @@ gd.on('plotly_relayout', function(eventData) {
                                eventData[axisName + '.range[1]'] !== undefined ||
                                eventData[axisName + '.range'] !== undefined;
         if (isFixedScale(axisName) || !trace.x || userSetThisAxis) { return; }
-        var xArr = decodeCached(trace, 'x');
+        var xNum = numericX(trace);
         var yArr = decodeCached(trace, 'y');
         var lowArr = decodeCached(trace, 'low');
         var highArr = decodeCached(trace, 'high');
-        for (var i = 0; i < xArr.length; i++) {
-            var t = new Date(xArr[i]).getTime();
-            if (t < x0 || t > x1) { continue; }
-            var vals = [];
+        var lo = null, hi = null;
+        var startIdx = lowerBound(xNum, x0);
+        for (var i = startIdx; i < xNum.length; i++) {
+            if (xNum[i] > x1) { break; }
             if (lowArr !== undefined && highArr !== undefined) {
-                if (lowArr[i] != null) vals.push(lowArr[i]);
-                if (highArr[i] != null) vals.push(highArr[i]);
+                if (lowArr[i] != null && (lo === null || lowArr[i] < lo)) { lo = lowArr[i]; }
+                if (highArr[i] != null && (hi === null || highArr[i] > hi)) { hi = highArr[i]; }
             } else if (yArr && yArr[i] != null) {
-                vals.push(yArr[i]);
+                if (lo === null || yArr[i] < lo) { lo = yArr[i]; }
+                if (hi === null || yArr[i] > hi) { hi = yArr[i]; }
             }
-            vals.forEach(function(v) {
-                if (!rowRanges[axisName]) { rowRanges[axisName] = {lo: v, hi: v}; }
-                else {
-                    if (v < rowRanges[axisName].lo) rowRanges[axisName].lo = v;
-                    if (v > rowRanges[axisName].hi) rowRanges[axisName].hi = v;
-                }
-            });
+        }
+        if (lo !== null) {
+            if (!rowRanges[axisName]) { rowRanges[axisName] = {lo: lo, hi: hi}; }
+            else {
+                if (lo < rowRanges[axisName].lo) { rowRanges[axisName].lo = lo; }
+                if (hi > rowRanges[axisName].hi) { rowRanges[axisName].hi = hi; }
+            }
         }
     });
 
@@ -844,6 +896,16 @@ var gd = document.getElementById('{plot_id}');
         var xVal = x0 + xFrac * (x1 - x0);
         var newX0 = xVal - (xVal - x0) * zoomFactor;
         var newX1 = xVal + (x1 - xVal) * zoomFactor;
+        // AUTO_RESCALE_ON_ZOOM_JS's own plotly_relayout listener reacts to
+        // ANY xaxis.range change by re-fitting every other panel's y-range
+        // to whatever's now visible -- exactly right for a deliberate
+        // box-zoom selection, but it was fighting this handler's whole
+        // point (scrolling the timeline shouldn't jostle the price scale):
+        // every wheel-zoom step nudged y a little via that "re-fit", which
+        // is what "still adjusting itself" was. gd.__skipAutoRescale tells
+        // that listener to sit this one relayout out; it clears the flag
+        // itself right after, so box-zoom/pan is unaffected.
+        gd.__skipAutoRescale = true;
         Plotly.relayout(gd, {
             'xaxis.range[0]': new Date(newX0).toISOString(),
             'xaxis.range[1]': new Date(newX1).toISOString(),
